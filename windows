@@ -1,0 +1,173 @@
+#include <iostream>
+#include <vector>
+#include <windows.h>
+#include <string>
+#include <sstream>
+#include <cstdlib>
+#include <cstring> // Pentru strncpy
+#include <stdexcept> // Pentru exceptii in std::stoi
+
+#define NUM_PROCESE 10
+#define INTERVAL 1000
+#define MAX_COMMAND_LENGTH 256
+
+// --- 1. FUNCTII UTILITARE (Algoritmul de Cautare Numere Prime) ---
+
+bool is_prime(int n) {
+    if (n <= 1) return false;
+    for (int i = 2; i * i <= n; ++i) {
+        if (n % i == 0) return false;
+    }
+    return true;
+}
+
+std::vector<int> find_primes_in_range(int start, int end) {
+    std::vector<int> primes;
+    for (int i = start; i <= end; ++i) {
+        if (is_prime(i)) {
+            primes.push_back(i);
+        }
+    }
+    return primes;
+}
+
+// --- 2. LOGICA PROCESULUI COPIL (CHILD) ---
+
+void child_process_worker(int start, int end) {
+    // 1. Executa algoritmul
+    std::vector<int> primes = find_primes_in_range(start, end);
+
+    // 2. Formateaza rezultatele intr-un string
+    std::string output;
+    for (int p : primes) {
+        output += std::to_string(p) + " ";
+    }
+    output += "\n";
+
+    // 3. Scrie rezultatul in STDOUT (redirectionat catre pipe-ul parintelui)
+    std::cout << output;
+    std::cout.flush();
+}
+
+// --- 3. LOGICA PROCESULUI PARINTE (PARENT MANAGER) ---
+
+void parent_process_manager() {
+    HANDLE hReadPipe[NUM_PROCESE];    // Părintele citește
+    HANDLE hWritePipe[NUM_PROCESE];   // Copilul scrie
+    PROCESS_INFORMATION pi[NUM_PROCESE] = { 0 };
+    STARTUPINFO si[NUM_PROCESE] = { 0 };
+
+    std::string cmd_line_template = "PrimeFinder.exe child ";
+
+    // 1. CREEAZA PIPE-URI SI PROCESE
+    for (int i = 0; i < NUM_PROCESE; ++i) {
+
+        si[i].cb = sizeof(si[i]);
+        si[i].dwFlags |= STARTF_USESTDHANDLES;
+
+        SECURITY_ATTRIBUTES sa;
+        sa.nLength = sizeof(sa);
+        sa.bInheritHandle = TRUE; // Permite mostenirea handle-ului de scriere
+        sa.lpSecurityDescriptor = NULL;
+
+        // Creaza Pipe-ul anonim
+        if (!CreatePipe(&hReadPipe[i], &hWritePipe[i], &sa, 0)) {
+            std::cerr << "Eroare la crearea pipe-ului " << i << ". Cod: " << GetLastError() << std::endl;
+            return;
+        }
+
+        // Face handle-ul de citire al parintelui non-mostenit
+        SetHandleInformation(hReadPipe[i], HANDLE_FLAG_INHERIT, 0);
+
+        // Pipe-ul de scriere (hWritePipe) devine STDOUT-ul copilului
+        si[i].hStdOutput = hWritePipe[i];
+
+        int start = i * INTERVAL + 1;
+        int end = (i + 1) * INTERVAL;
+
+        // Creeaza linia de comanda
+        std::string cmd_line_str = cmd_line_template + std::to_string(start) + " " + std::to_string(end);
+
+        char command_line[MAX_COMMAND_LENGTH];
+
+        // CORECTAT: Folosim strncpy, care functioneaza cu MinGW/g++
+        strncpy(command_line, cmd_line_str.c_str(), MAX_COMMAND_LENGTH - 1);
+        command_line[MAX_COMMAND_LENGTH - 1] = '\0'; // Asigura terminarea sirului
+
+        // Creaza Procesul Copil
+        if (!CreateProcess(
+            NULL,
+            command_line,
+            NULL,
+            NULL,
+            TRUE,               // !!! Mosteneste handle-uri: TRUE
+            0,
+            NULL,
+            NULL,
+            &si[i],
+            &pi[i]
+        )) {
+            std::cerr << "Eroare la crearea procesului copil " << i << ". Cod: " << GetLastError() << std::endl;
+            CloseHandle(hReadPipe[i]);
+            CloseHandle(hWritePipe[i]);
+            return;
+        }
+
+        // Părintele nu folosește handle-ul de scriere, il inchidem
+        CloseHandle(hWritePipe[i]);
+    }
+
+    // 2. AȘTEAPTĂ ȘI CITEȘTE REZULTATELE
+    std::cout << "\n------------------------------------------" << std::endl;
+    std::cout << "Numere Prime Gasite (Colectate de la 10 Procese):" << std::endl;
+    std::cout << "------------------------------------------" << std::endl;
+
+    for (int i = 0; i < NUM_PROCESE; ++i) {
+        // Asteapta ca procesul copil sa se termine
+        WaitForSingleObject(pi[i].hProcess, INFINITE);
+
+        char buffer[4096];
+        DWORD bytesRead;
+        std::string result = "";
+
+        // Citeste datele din pipe-ul copilului
+        while (ReadFile(hReadPipe[i], buffer, sizeof(buffer) - 1, &bytesRead, NULL) && bytesRead > 0) {
+            buffer[bytesRead] = '\0';
+            result += buffer;
+        }
+
+        std::cout << result;
+
+        // Curata handle-urile
+        CloseHandle(pi[i].hProcess);
+        CloseHandle(pi[i].hThread);
+        CloseHandle(hReadPipe[i]);
+    }
+}
+
+// --- 4. FUNCTIA PRINCIPALA (MAIN) ---
+
+int main(int argc, char* argv[]) {
+    // Daca programul ruleaza cu argumentul "child", inseamna ca este un proces copil
+    if (argc > 1 && std::string(argv[1]) == "child") {
+        if (argc < 4) {
+            std::cerr << "Eroare: Procesul copil necesita argumente de start si end." << std::endl;
+            return 1;
+        }
+        try {
+            int start = std::stoi(argv[2]);
+            int end = std::stoi(argv[3]);
+            child_process_worker(start, end);
+        }
+        catch (const std::exception& e) {
+            std::cerr << "Eroare la conversia argumentelor: " << e.what() << std::endl;
+            return 1;
+        }
+        return 0;
+    }
+    else {
+        // Programul ruleaza ca proces parinte
+        parent_process_manager();
+        return 0;
+    }
+}
