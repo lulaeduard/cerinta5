@@ -1,0 +1,113 @@
+#include <iostream>
+#include <vector>
+#include <string>
+#include <sstream>
+#include <unistd.h>     // Pentru fork, pipe, read, write, close (POSIX)
+#include <sys/wait.h>   // Pentru waitpid
+#include <cstring>      
+#include <cstdlib>      // Pentru exit
+
+#define NUM_PROCESE 10
+#define INTERVAL 1000
+#define MAX_BUFFER 4096
+
+// --- 1. Functii Utilitare ---
+
+bool is_prime(int n) {
+    if (n <= 1) return false;
+    for (int i = 2; i * i <= n; ++i) {
+        if (n % i == 0) return false;
+    }
+    return true;
+}
+
+std::vector<int> find_primes_in_range(int start, int end) {
+    std::vector<int> primes;
+    for (int i = start; i <= end; ++i) {
+        if (is_prime(i)) {
+            primes.push_back(i);
+        }
+    }
+    return primes;
+}
+
+// --- 2. Functia Principala (main) ---
+
+int main() {
+    int read_fds[NUM_PROCESE][2];
+    pid_t pids[NUM_PROCESE];
+    
+    std::cout << "Pornire cautare numere prime pe " << NUM_PROCESE << " procese (POSIX)..." << std::endl;
+
+    // 1. CREEAZA PIPE-URI ȘI PROCESE (fork)
+    for (int i = 0; i < NUM_PROCESE; ++i) {
+        
+        if (pipe(read_fds[i]) == -1) {
+            perror("Eroare la crearea pipe-ului");
+            return 1;
+        }
+
+        pids[i] = fork();
+
+        if (pids[i] == -1) {
+            perror("Eroare la fork");
+            return 1;
+        }
+
+        if (pids[i] == 0) {
+            // --- PROCESUL COPIL (PID = 0) ---
+            close(read_fds[i][0]);
+            
+            int start = i * INTERVAL + 1;
+            int end = (i + 1) * INTERVAL;
+
+            std::vector<int> primes = find_primes_in_range(start, end);
+
+            // Formateaza si scrie rezultatele in pipe
+            std::stringstream ss;
+            ss << "Procesul " << i + 1 << " [" << start << "-" << end << "]: ";
+            for (int p : primes) {
+                ss << p << " ";
+            }
+            ss << "\n";
+            std::string output = ss.str();
+            
+            write(read_fds[i][1], output.c_str(), output.length());
+
+            close(read_fds[i][1]);
+            
+            exit(0);
+        } else {
+            // --- PROCESUL PARINTE (PID > 0) ---
+            close(read_fds[i][1]);
+        }
+    }
+
+    // 2. COLECTEAZA ȘI AFIȘEAZĂ REZULTATELE
+    std::cout << "\n------------------------------------------" << std::endl;
+    std::cout << "Rezultate Colectate:" << std::endl;
+    std::cout << "------------------------------------------" << std::endl;
+
+    for (int i = 0; i < NUM_PROCESE; ++i) {
+        waitpid(pids[i], NULL, 0);
+
+        char buffer[MAX_BUFFER];
+        ssize_t bytes_read;
+        std::string result = "";
+
+        while ((bytes_read = read(read_fds[i][0], buffer, MAX_BUFFER - 1)) > 0) {
+            buffer[bytes_read] = '\0'; 
+            result += buffer;
+        }
+        
+        std::cout << result;
+
+        close(read_fds[i][0]);
+    }
+    
+    std::cout << "------------------------------------------" << std::endl;
+    // Corectat: std::endl in loc de std.:endl
+    std::cout << "Toate procesele au fost finalizate." << std::endl; 
+
+    return 0;
+}
